@@ -97,20 +97,25 @@ void onStart(ServiceInstance service) async {
 
   // Una posición cada ~20 s o cada 15 m recorridos (lo que ocurra después),
   // para no llenar la base con miles de puntos idénticos en un semáforo.
-  const LocationSettings ajustes = AndroidSettings(
+  // AndroidSettings no es const: se construye en tiempo de ejecución.
+  final LocationSettings ajustes = AndroidSettings(
     accuracy: LocationAccuracy.high,
     distanceFilter: 15,
-    intervalDuration: Duration(seconds: 20),
+    intervalDuration: const Duration(seconds: 20),
   );
 
   int enviados = 0;
 
   sub = Geolocator.getPositionStream(locationSettings: ajustes).listen(
     (Position position) async {
-      final user = supabase?.auth.currentUser;
+      // Copias locales no anulables: Dart no puede "promover" variables
+      // externas a través de un await.
+      final SupabaseClient? sb = supabase;
+      final Box? box = offlineBox;
+      final user = sb?.auth.currentUser;
 
-      if (supabase != null && user != null) {
-        final payload = {
+      if (sb != null && user != null) {
+        final payload = <String, dynamic>{
           'user_id': user.id,
           'latitud': position.latitude,
           'longitud': position.longitude,
@@ -118,26 +123,29 @@ void onStart(ServiceInstance service) async {
         };
 
         try {
-          if (offlineBox != null && offlineBox.isNotEmpty) {
+          if (box != null && box.isNotEmpty) {
             final pendientes = <Map<String, dynamic>>[
-              for (final key in offlineBox.keys)
-                Map<String, dynamic>.from(offlineBox.get(key)),
+              for (final key in box.keys)
+                Map<String, dynamic>.from(box.get(key) as Map),
             ];
-            await supabase.from(kTablaUbicaciones).insert(pendientes);
-            await offlineBox.clear();
+            await sb.from(kTablaUbicaciones).insert(pendientes);
+            await box.clear();
             enviados += pendientes.length;
           }
-          await supabase.from(kTablaUbicaciones).insert(payload);
+          await sb.from(kTablaUbicaciones).insert(payload);
           enviados++;
         } catch (e) {
           // Sin red, o sin permiso en la tabla (RLS): se guarda y se reintenta.
-          await offlineBox?.add(payload);
-          debugPrint('[rastreo] guardado offline (${offlineBox?.length ?? 0} pendientes): $e');
-          if (e.toString().contains('42501') || e.toString().contains('permission')) {
+          if (box != null) {
+            await box.add(payload);
+          }
+          debugPrint('[rastreo] guardado offline (${box?.length ?? 0} pendientes): $e');
+          final texto = e.toString();
+          if (texto.contains('42501') || texto.contains('permission')) {
             reportar('Supabase rechazó la posición (permisos). Avisa a la oficina.');
           }
         }
-      } else if (supabase != null) {
+      } else if (sb != null) {
         reportar('No hay sesión activa en segundo plano; vuelve a iniciar sesión.');
       }
 
@@ -153,7 +161,7 @@ void onStart(ServiceInstance service) async {
         'latitude': position.latitude,
         'longitude': position.longitude,
         'enviados': enviados,
-        'pendientes': offlineBox?.length ?? 0,
+        'pendientes': box?.length ?? 0,
       });
     },
     onError: (Object e) {
