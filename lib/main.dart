@@ -235,9 +235,20 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    // El ID real de la tabla motorizados es INT8.
-    // Buscar usando el UUID del usuario autenticado
-    final String motorizadoId = motorizado['auth_user_id'];
+    // rutas_paradas.motorizado_id es UUID y coincide con auth.users.id.
+    final motorizadoId = motorizado['auth_user_id'] as String?;
+
+    if (motorizadoId == null || motorizadoId.isEmpty) {
+      debugPrint('ERROR: EL MOTORIZADO NO TIENE auth_user_id');
+      if (mounted) {
+        setState(() {
+          _paradas = [];
+          _motivo = 'Tu perfil de motorizado no tiene un ID de autenticación válido.';
+          _isLoadingParadas = false;
+        });
+      }
+      return;
+    }
 
     debugPrint('========================================');
     debugPrint('MOTORIZADO ID: $motorizadoId');
@@ -247,9 +258,12 @@ class _HomeScreenState extends State<HomeScreen> {
     // 3. BUSCAR LAS PARADAS DEL MOTORIZADO
     // ==========================================================
 
-    // Solo las paradas de HOY (columna fecha creada por el puente SQL).
-    // Sin este filtro la lista acumula todos los días anteriores.
-    final hoy = DateTime.now().toIso8601String().split('T').first;
+    // La columna fecha del puente se genera en horario America/Caracas.
+    // Calculamos la misma fecha para no depender de la zona horaria del teléfono.
+    final hoyCaracas = DateTime.now()
+        .toUtc()
+        .subtract(const Duration(hours: 4));
+    final hoy = hoyCaracas.toIso8601String().split('T').first;
 
     final data = await _supabase
         .from('rutas_paradas')
