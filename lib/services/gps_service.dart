@@ -27,8 +27,12 @@ class GpsService {
     bool hasPermission = await requestAllPermissions();
     if (!hasPermission) return null;
 
+    // `desiredAccuracy` desapareció en geolocator 13; `locationSettings`
+    // funciona en todas las versiones desde la 10.
     return await Geolocator.getCurrentPosition(
-      desiredAccuracy: LocationAccuracy.high,
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+      ),
     );
   }
 }
