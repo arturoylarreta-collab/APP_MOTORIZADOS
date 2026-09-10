@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'config.dart';
 import 'theme/theme.dart';
@@ -107,7 +108,16 @@ class _HomeScreenState extends State<HomeScreen> {
         setState(() {
           _latitude = event['latitude'];
           _longitude = event['longitude'];
+          _isTracking = true;
         });
+      }
+    });
+
+    // El servicio avisa aquí si algo falla en segundo plano (permisos,
+    // sesión, Supabase) en vez de cerrarse en silencio.
+    FlutterBackgroundService().on('trackingError').listen((event) {
+      if (mounted && event != null && event['mensaje'] != null) {
+        _avisarRastreo(event['mensaje'].toString());
       }
     });
   }
@@ -322,42 +332,92 @@ class _HomeScreenState extends State<HomeScreen> {
   ) async {
     if (paradas.isEmpty) return;
 
-    final service = FlutterBackgroundService();
-    final isRunning = await service.isRunning();
-
     final completadas =
         paradas.where((p) => p['estado'] == 'completada').length;
-
     final total = paradas.length;
+    final pendientes = total - completadas;
 
-    if (completadas > 0 && completadas < total) {
-      if (!isRunning) {
-        final hasPermissions =
-            await _gpsService.requestAllPermissions();
-
-        if (hasPermissions) {
-          await service.startService();
-
-          if (mounted) {
-            setState(() {
-              _isTracking = true;
-            });
-          }
-        }
-      }
+    // Antes solo arrancaba tras completar la PRIMERA parada, así que el
+    // trayecto oficina → primera máquina nunca quedaba registrado. Ahora
+    // arranca en cuanto hay paradas pendientes y se detiene al terminar todas.
+    if (pendientes > 0) {
+      await _iniciarRastreo(silencioso: true);
     } else if (completadas == total && total > 0) {
-      if (isRunning) {
-        service.invoke('stopService');
-
-        if (mounted) {
-          setState(() {
-            _isTracking = false;
-            _latitude = null;
-            _longitude = null;
-          });
-        }
-      }
+      await _detenerRastreo();
     }
+  }
+
+  // ==========================================================
+  // INICIAR / DETENER RASTREO (botón y automático)
+  // ==========================================================
+
+  Future<void> _iniciarRastreo({bool silencioso = false}) async {
+    final service = FlutterBackgroundService();
+    try {
+      if (await service.isRunning()) {
+        if (mounted) setState(() => _isTracking = true);
+        return;
+      }
+
+      // 1) Ubicación (obligatoria)
+      final tieneUbicacion = await _gpsService.requestAllPermissions();
+      if (!tieneUbicacion) {
+        _avisarRastreo(
+          'Sin permiso de ubicación. Actívalo en Ajustes → Aplicaciones → Vendu → Permisos.',
+          silencioso: silencioso,
+        );
+        return;
+      }
+
+      // 2) Notificaciones (Android 13+): el servicio muestra una notificación
+      //    permanente; sin este permiso Android puede negarse a arrancarlo.
+      final notif = await Permission.notification.status;
+      if (notif.isDenied) {
+        await Permission.notification.request();
+      }
+
+      // 3) Ubicación "todo el tiempo" (opcional, mejora el rastreo con la
+      //    pantalla apagada). Si el chofer la niega, igual funciona en primer plano.
+      final siempre = await Permission.locationAlways.status;
+      if (siempre.isDenied) {
+        await Permission.locationAlways.request();
+      }
+
+      final started = await service.startService();
+      if (mounted) setState(() => _isTracking = started);
+      if (!started) {
+        _avisarRastreo('Android no dejó arrancar el rastreo. Revisa los permisos de la app.',
+            silencioso: silencioso);
+      }
+    } catch (e) {
+      // Nunca dejar que un fallo del servicio tumbe la pantalla.
+      if (mounted) setState(() => _isTracking = false);
+      _avisarRastreo('No se pudo iniciar el rastreo: $e', silencioso: silencioso);
+    }
+  }
+
+  Future<void> _detenerRastreo() async {
+    final service = FlutterBackgroundService();
+    try {
+      if (await service.isRunning()) {
+        service.invoke('stopService');
+      }
+    } catch (_) {}
+    if (mounted) {
+      setState(() {
+        _isTracking = false;
+        _latitude = null;
+        _longitude = null;
+      });
+    }
+  }
+
+  void _avisarRastreo(String texto, {bool silencioso = false}) {
+    debugPrint('[rastreo] $texto');
+    if (silencioso || !mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(texto), backgroundColor: VenduColors.rojo),
+    );
   }
 
   // ==========================================================
@@ -693,7 +753,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             else
 
                               const Text(
-                                'Inicia al marcar la 1ra parada',
+                                'Arranca solo cuando hay paradas pendientes',
 
                                 style:
                                     TextStyle(
@@ -703,6 +763,26 @@ class _HomeScreenState extends State<HomeScreen> {
                                 ),
                               ),
                           ],
+                        ),
+                      ),
+
+                      // Botón manual: permite arrancar/detener sin depender
+                      // del estado de las paradas (y probar el GPS).
+                      TextButton(
+                        onPressed: () => _isTracking
+                            ? _detenerRastreo()
+                            : _iniciarRastreo(),
+                        style: TextButton.styleFrom(
+                          foregroundColor: _isTracking
+                              ? VenduColors.gris
+                              : VenduColors.amarillo,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 12),
+                        ),
+                        child: Text(
+                          _isTracking ? 'Detener' : 'Iniciar',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold),
                         ),
                       ),
                     ],
