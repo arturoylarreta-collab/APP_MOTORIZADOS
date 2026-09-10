@@ -81,10 +81,18 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isTracking = false;
   bool _isLoadingParadas = true;
 
+  // Motivo visible cuando la lista sale vacía (portado de vendu_service.dart).
+  // Antes todos los fallos mostraban el mismo texto y no se podía diagnosticar.
+  String? _motivo;
+
   List<Map<String, dynamic>> _paradas = [];
 
   double? _latitude;
   double? _longitude;
+
+  // Canal Realtime: cuando el dashboard asigna/cambia una parada de este
+  // motorizado, Supabase avisa y la lista se recarga sola.
+  RealtimeChannel? _canalParadas;
 
   @override
   void initState() {
@@ -92,6 +100,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     _checkServiceStatus();
     _cargarParadas();
+    _suscribirRealtime();
 
     FlutterBackgroundService().on('updateLocation').listen((event) {
       if (mounted && event != null) {
@@ -101,6 +110,39 @@ class _HomeScreenState extends State<HomeScreen> {
         });
       }
     });
+  }
+
+  @override
+  void dispose() {
+    _canalParadas?.unsubscribe();
+    super.dispose();
+  }
+
+  // ==========================================================
+  // REALTIME: escuchar rutas_paradas del motorizado logueado
+  // Requiere: ALTER PUBLICATION supabase_realtime ADD TABLE rutas_paradas
+  // ==========================================================
+
+  void _suscribirRealtime() {
+    final uid = _supabase.auth.currentUser?.id;
+    if (uid == null) return;
+
+    _canalParadas = _supabase
+        .channel('rutas_paradas_$uid')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.all,
+          schema: 'public',
+          table: 'rutas_paradas',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'motorizado_id',
+            value: uid,
+          ),
+          callback: (_) {
+            if (mounted) _cargarParadas();
+          },
+        )
+        .subscribe();
   }
 
   // ==========================================================
@@ -130,6 +172,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         setState(() {
           _paradas = [];
+          _motivo = 'No hay sesión activa. Cierra sesión y vuelve a entrar.';
           _isLoadingParadas = false;
         });
       }
@@ -160,6 +203,9 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         setState(() {
           _paradas = [];
+          _motivo =
+              'Tu usuario (${user.email ?? user.id}) no está vinculado a un motorizado. '
+              'Pide a la oficina que lo cree en la tabla motorizados.';
           _isLoadingParadas = false;
         });
       }
@@ -179,6 +225,9 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         setState(() {
           _paradas = [];
+          _motivo =
+              '${motorizado['nombre'] ?? 'Tu perfil'} está marcado como inactivo. '
+              'La oficina debe activarlo en la tabla motorizados.';
           _isLoadingParadas = false;
         });
       }
@@ -198,10 +247,15 @@ class _HomeScreenState extends State<HomeScreen> {
     // 3. BUSCAR LAS PARADAS DEL MOTORIZADO
     // ==========================================================
 
+    // Solo las paradas de HOY (columna fecha creada por el puente SQL).
+    // Sin este filtro la lista acumula todos los días anteriores.
+    final hoy = DateTime.now().toIso8601String().split('T').first;
+
     final data = await _supabase
         .from('rutas_paradas')
         .select()
         .eq('motorizado_id', motorizadoId)
+        .eq('fecha', hoy)
         .order('orden', ascending: true);
 
     debugPrint('========================================');
@@ -217,6 +271,10 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) {
       setState(() {
         _paradas = paradasList;
+        _motivo = paradasList.isEmpty
+            ? '${motorizado['nombre'] ?? 'Este motorizado'} no tiene paradas '
+                'asignadas para hoy ($hoy). Asígnalas desde el dashboard.'
+            : null;
         _isLoadingParadas = false;
       });
 
@@ -232,6 +290,9 @@ class _HomeScreenState extends State<HomeScreen> {
     if (mounted) {
       setState(() {
         _paradas = [];
+        // Un "permission denied" (42501) o RLS mal configurada aparece aquí,
+        // en vez de disfrazarse de "no tienes paradas".
+        _motivo = 'Error al consultar Supabase: $e';
         _isLoadingParadas = false;
       });
     }
@@ -695,19 +756,23 @@ class _HomeScreenState extends State<HomeScreen> {
 
               else if (_paradas.isEmpty)
 
-                const Padding(
+                Padding(
                   padding:
-                      EdgeInsets.symmetric(
+                      const EdgeInsets.symmetric(
                     vertical: 30,
+                    horizontal: 8,
                   ),
 
                   child: Center(
                     child: Text(
-                      'No tienes paradas asignadas para hoy.',
+                      _motivo ??
+                          'No tienes paradas asignadas para hoy.',
+                      textAlign: TextAlign.center,
 
-                      style: TextStyle(
+                      style: const TextStyle(
                         color:
                             VenduColors.gris,
+                        height: 1.4,
                       ),
                     ),
                   ),
